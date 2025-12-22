@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>NCU Point Cloud – Gold ↔ Cyan Gradient</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body{
+      background:#000; color: rgba(255,255,255,.8);
+      overflow-x:hidden; overflow-y:auto;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    }
+    #bg{ position:fixed; inset:0; width:100%; height:100%; z-index:-1; pointer-events:none; display:block; }
+    #loading{
+      position:fixed; top:18px; left:18px; z-index:10;
+      color: rgba(255,255,255,.55);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      pointer-events:none;
+    }
+    main{ position:relative; z-index:1; }
+    section{ min-height:120vh; padding:14vh 10vw; border-bottom:1px solid rgba(255,255,255,.08); }
+    h1{ font-size: clamp(36px, 5vw, 72px); margin:0 0 14px; letter-spacing:.02em; }
+    p{ max-width:72ch; line-height:1.65; margin:0; color: rgba(255,255,255,.65); }
+  </style>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+
+<body>
+  <div id="loading">正在加载点云（data/ncu.txt）…</div>
+  <canvas id="bg"></canvas>
+
+  <main>
+    <section>
+      <h1>ASSEMBLE</h1>
+      <p>入场：点从远处散布 → 匯聚成目标形状。</p>
+    </section>
+    <section>
+      <h1>EXPLODE</h1>
+      <p>滚动：点从形状炸开散到背景中（并逐渐变淡/变小）。</p>
+    </section>
+    <section>
+      <h1>GRADIENT</h1>
+      <p>顏色：金色 ↔ cyan 漸變（可用 GUI 調整曲線強度）。</p>
+    </section>
+  </main>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { GUI } from "three/addons/libs/lil-gui.module.min.js";
+    import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+    import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+    import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+
+    // ----------------------------
+    // Scene / Camera / Renderer
+    // ----------------------------
+    const canvas = document.querySelector("#bg");
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2500);
+    camera.up.set(0, 0, 1);
+
+    const camBase = new THREE.Vector3(0, -45, 10);
+    camera.position.copy(camBase);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x000000, 1);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+
+    // ----------------------------
+    // Bloom
+    // ----------------------------
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+
+    const bloomParams = { strength: 3.0, radius: 1.0, threshold: 0.34 };
+    const bloomPass = new UnrealBloomPass(
+      new THREE.Vector2(window.innerWidth, window.innerHeight),
+      bloomParams.strength,
+      bloomParams.radius,
+      bloomParams.threshold
+    );
+    composer.addPass(bloomPass);
+
+    // ----------------------------
+    // Root
+    // ----------------------------
+    const root = new THREE.Group();
+    scene.add(root);
+
+    // ----------------------------
+    // Assemble / Explode controls
+    // ----------------------------
+    const assembleParams = {
+      delay: 0.10,
+      duration: 1.70,
+      radius: 95.0,
+      depth: 140.0,
+      swirl: 2.2,
+    };
+
+    const explodeParams = {
+      start: 0.30,
+      end: 0.92,
+      radius: 260.0,
+      depth: 220.0,
+      shrink: 0.55,
+      fade: 0.85,
+    };
+
+    // ----------------------------
+    // Spring-based field mouse
+    // ----------------------------
+    const mouseTarget = new THREE.Vector2(-10, -10);
+    const mouseField  = new THREE.Vector2(-10, -10);
+    const mouseVel    = new THREE.Vector2(0, 0);
+
+    const spring = { K: 28.0, D: 12.5 };
+    const limits = { maxFieldSpeed: 2.2, maxForceAlpha: 0.85 };
+
+    // ----------------------------
+    // Shared uniforms
+    // ----------------------------
+    const globalUniforms = {
+      uTime: { value: 0 },
+
+      uMouse: { value: new THREE.Vector2(-10, -10) },
+      uAspect: { value: window.innerWidth / window.innerHeight },
+
+      // Assemble / Explode
+      uAssemble: { value: 0.0 },
+      uExplode: { value: 0.0 },
+      uAssembleRadius: { value: assembleParams.radius },
+      uAssembleDepth:  { value: assembleParams.depth },
+      uAssembleSwirl:  { value: assembleParams.swirl },
+      uExplodeRadius:  { value: explodeParams.radius },
+      uExplodeDepth:   { value: explodeParams.depth },
+      uExplodeShrink:  { value: explodeParams.shrink },
+      uExplodeFade:    { value: explodeParams.fade },
+
+      // camera away dir (object space)
+      uCamAwayDir: { value: new THREE.Vector3(0, 1, 0) },
+
+      // Nebula noise/breathe
+      uNoiseScale: { value: 2.5 },
+      uNoiseAmp:   { value: 0.77 },
+      uMoveRange:  { value: 0.22 },
+      uCenter:     { value: new THREE.Vector3(0, 0, 0) },
+
+      // ray axis + move dir (view)
+      uRayDirView:  { value: new THREE.Vector3(0, 0, -1) },
+      uMoveDirView: { value: new THREE.Vector3(0, 0, 0) },
+
+      // force alpha
+      uForceAlpha: { value: 0.0 },
+
+      // forces
+      uForceRadius:   { value: 3.24 },
+      uPushStrength:  { value: 3.12 },
+      uSwirlStrength: { value: 0.0 },
+      uTiltStrength:  { value: 0.0 },
+      uDepthStrength: { value: 0.0 },
+
+      // No Vacuum
+      uCoreRadius:   { value: 1.43 },
+      uHetero:       { value: 1.0 },
+      uMinInfluence: { value: 0.19 },
+
+      // hover (default off)
+      uInteractionRadius: { value: 0.16 },
+      uHoverWeight: { value: 0.00 },
+
+      uEdgeJitter: { value: 0.28 },
+      uSizeGain:   { value: 1.05 },
+
+      uVarLumAmp:   { value: 0.65 },
+      uVarAlphaAmp: { value: 0.55 },
+      uTwinkleAmp:  { value: 0.12 },
+    };
+
+    // ----------------------------
+    // Background Dust (保持原樣)
+    // ----------------------------
+    const bgParams = {
+      enabled: true,
+      count: 6500,
+      size: 0.11,
+      opacity: 0.22,
+      drift: 0.55,
+      twinkle: 0.22,
+      depthFade: 0.85,
+    };
+
+    const bgUniforms = {
+      uTime: { value: 0 },
+      uOpacity: { value: bgParams.opacity },
+      uSize: { value: bgParams.size },
+      uDrift: { value: bgParams.drift },
+      uTwinkle: { value: bgParams.twinkle },
+      uDepthFade: { value: bgParams.depthFade },
+      uColorA: { value: new THREE.Color(0.65, 0.75, 1.0) },
+      uColorB: { value: new THREE.Color(1.0, 0.85, 0.65) },
+      uExplode: { value: 0 },
+    };
+
+    // ----------------------------
+    // Main Shaders (Gold ↔ Cyan gradient)
+    // ----------------------------
+    const mainVertexShader = `
+      uniform float uTime;
+      uniform float uPointSize;
+
+      uniform float uAssemble;
+      uniform float uExplode;
+      uniform float uAssembleRadius;
+      uniform float uAssembleDepth;
+      uniform float uAssembleSwirl;
+      uniform float uExplodeRadius;
+      uniform float uExplodeDepth;
+      uniform float uExplodeShrink;
+
+      uniform vec3  uCamAwayDir;
+      uniform vec2  uMouse;
+      uniform float uInteractionRadius;
+      uniform float uHoverWeight;
+      uniform float uAspect;
+
+      uniform float uNoiseScale;
+      uniform float uNoiseAmp;
+      uniform float uMoveRange;
+      uniform vec3  uCenter;
+
+      uniform vec3  uRayDirView;
+      uniform vec3  uMoveDirView;
+
+      uniform float uForceRadius;
+      uniform float uForceAlpha;
+
+      uniform float uPushStrength;
+      uniform float uSwirlStrength;
+      uniform float uTiltStrength;
+      uniform float uDepthStrength;
+
+      uniform float uCoreRadius;
+      uniform float uHetero;
+      uniform float uMinInfluence;
+
+      uniform float uSizeGain;
+      uniform float uEdgeJitter;
+
+      uniform float uVarLumAmp;
+      uniform float uVarAlphaAmp;
+      uniform float uTwinkleAmp;
+
+      attribute float aRandom;
+      attribute float aRandom2;
+
+      // NEW: gradient factor per point (0..1)
+      attribute float aC;
+      varying float vC;
+
+      varying float vInteractIntensity;
+      varying vec3  vVar;
+      varying float vAssemble;
+      varying float vExplode;
+
+      vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+      vec4 mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+      vec4 permute(vec4 x) { return mod289(((x * 34.0) + 1.0) * x); }
+      vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+      float snoise(vec3 v) {
+        const vec2  C = vec2(1.0/6.0, 1.0/3.0);
+        const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
+
+        vec3 i  = floor(v + dot(v, C.yyy));
+        vec3 x0 = v - i + dot(i, C.xxx);
+
+        vec3 g = step(x0.yzx, x0.xyz);
+        vec3 l = 1.0 - g;
+        vec3 i1 = min(g.xyz, l.zxy);
+        vec3 i2 = max(g.xyz, l.zxy);
+
+        vec3 x1 = x0 - i1 + C.xxx;
+        vec3 x2 = x0 - i2 + C.yyy;
+        vec3 x3 = x0 - D.yyy;
+
+        i = mod289(i);
+        vec4 p = permute(permute(permute(
+                  i.z + vec4(0.0, i1.z, i2.z, 1.0))
+                + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+                + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+
+        float n_ = 1.0/7.0;
+        vec3  ns = n_ * D.wyz - D.xzx;
+
+        vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+        vec4 x_ = floor(j * ns.z);
+        vec4 y_ = floor(j - 7.0 * x_);
+
+        vec4 x = x_ * ns.x + ns.yyyy;
+        vec4 y = y_ * ns.x + ns.yyyy;
+        vec4 h = 1.0 - abs(x) - abs(y);
+
+        vec4 b0 = vec4(x.xy, y.xy);
+        vec4 b1 = vec4(x.zw, y.zw);
+
+        vec4 s0 = floor(b0) * 2.0 + 1.0;
+        vec4 s1 = floor(b1) * 2.0 + 1.0;
+        vec4 sh = -step(h, vec4(0.0));
+
+        vec4 a0 = b0.xzyw + s0.xzyw * sh.xxyy;
+        vec4 a1 = b1.xzyw + s1.xzyw * sh.zzww;
+
+        vec3 p0 = vec3(a0.xy, h.x);
+        vec3 p1 = vec3(a0.zw, h.y);
+        vec3 p2 = vec3(a1.xy, h.z);
+        vec3 p3 = vec3(a1.zw, h.w);
+
+        vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+        p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+
+        vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+        m = m * m;
+
+        return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+      }
+
+      float gauss(float d, float sigma){
+        sigma = max(1e-4, sigma);
+        return exp(-(d*d) / (2.0 * sigma * sigma));
+      }
+
+      float easeOutCubic(float x){ return 1.0 - pow(1.0 - x, 3.0); }
+      float easeInOut(float x){ return x*x*(3.0 - 2.0*x); }
+
+      vec3 randDir(float r1, float r2){
+        float u = r1 * 2.0 - 1.0;
+        float t = r2 * 6.28318530718;
+        float s = sqrt(max(0.0, 1.0 - u*u));
+        return vec3(s*cos(t), s*sin(t), u);
+      }
+
+      vec3 rotZ(vec3 p, float a){
+        float c = cos(a), s = sin(a);
+        return vec3(c*p.x - s*p.y, s*p.x + c*p.y, p.z);
+      }
+
+      void main(){
+        float A = clamp(uAssemble, 0.0, 1.0);
+        float E = clamp(uExplode, 0.0, 1.0);
+        float Ae = easeOutCubic(A);
+        float Ee = easeInOut(E);
+
+        vAssemble = Ae;
+        vExplode  = Ee;
+
+        // pass gradient factor to fragment
+        vC = aC;
+
+        vec3 target = position;
+        vec3 d = randDir(aRandom, aRandom2);
+
+        float rA = uAssembleRadius * (0.55 + 0.95 * aRandom2);
+        vec3 start = uCenter + d * rA + uCamAwayDir * uAssembleDepth;
+
+        float swirl = uAssembleSwirl * (1.0 - Ae) * (0.6 + 0.9 * aRandom);
+        vec3 startSwirled = rotZ(start, swirl);
+
+        vec3 pos0 = mix(startSwirled, target, Ae);
+
+        vec3 outDir = normalize((target - uCenter) + d * 0.22);
+        float rE = uExplodeRadius * (0.45 + 1.05 * aRandom);
+        vec3 explode = target + outDir * rE + uCamAwayDir * uExplodeDepth;
+
+        vec3 pos = mix(pos0, explode, Ee);
+
+        float formed = Ae * (1.0 - Ee);
+
+        vec3 nrm = normalize(pos - uCenter + 1e-5);
+        float n = snoise((pos - uCenter) * uNoiseScale + vec3(0.0, 0.0, uTime * 0.35 + aRandom * 10.0));
+        pos += nrm * n * uNoiseAmp * formed;
+
+        pos.x += sin(uTime * 0.45 + aRandom * 10.0) * uMoveRange * formed;
+        pos.y += cos(uTime * 0.35 + aRandom * 10.0) * uMoveRange * formed;
+        pos.z += sin(uTime * 0.40 + aRandom * 10.0) * (uMoveRange * 0.6) * formed;
+
+        vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+        vec3 p = mvPosition.xyz;
+
+        float a = uForceAlpha * formed;
+        float fVisual = 0.0;
+
+        if (a > 0.0001){
+          vec3 axis = normalize(uRayDirView);
+
+          vec3 mv = uMoveDirView;
+          float mvl = length(mv);
+          if (mvl > 0.0001) mv /= mvl;
+
+          vec3 mvP = mv - axis * dot(mv, axis);
+          mvP = normalize(mvP + 1e-5);
+
+          vec3 axis2 = normalize(axis + mvP * (uTiltStrength * a));
+
+          float tRay = dot(p, axis2);
+          vec3 closest = axis2 * tRay;
+
+          vec3 rvec = p - closest;
+          float dRay = length(rvec);
+
+          float edgeN = snoise((closest + rvec * 0.25) * 0.35 + vec3(0.0, 0.0, uTime * 0.20 + aRandom * 3.0));
+          float dn    = snoise(p * 0.22 + vec3(0.0, 0.0, uTime * 0.18 + aRandom * 3.0));
+
+          float dJ = dRay
+            + edgeN * (uForceRadius * uEdgeJitter)
+            + dn    * (uForceRadius * (uEdgeJitter * 0.45));
+
+          float density = 0.55 + 0.45 * (0.5 + 0.5 * dn);
+
+          float sigmaForce = uForceRadius * 0.60;
+          float fForce = gauss(dJ, sigmaForce);
+
+          float coreSigma = uCoreRadius * (0.95 + 0.25 * density);
+          float core = 1.0 - gauss(dRay, coreSigma);
+
+          float f = fForce * core;
+
+          float jitter = snoise(p * 0.35 + vec3(0.0, 0.0, uTime * 0.18 + aRandom * 7.0));
+          float per = mix(uMinInfluence, 1.0, smoothstep(-0.25, 0.75, jitter + aRandom * 0.85));
+          float influence = a * f * mix(1.0, per, uHetero);
+
+          vec3 radial = normalize(rvec + 1e-5);
+          vec3 tangent = normalize(cross(axis2, radial) + 1e-5);
+
+          float tight = 1.0 / (dRay + 0.75);
+          tight = min(tight, 1.6);
+
+          float push  = uPushStrength  * influence;
+          float swirl2 = uSwirlStrength * influence * tight * density;
+
+          float depthN = snoise(p * 0.18 + vec3(0.0, 0.0, uTime * 0.22));
+          float depth  = uDepthStrength * influence * (depthN * 0.55);
+
+          p += radial  * push;
+          p += tangent * swirl2;
+          p += axis2   * depth;
+
+          mvPosition.xyz = p;
+
+          float s1 = uForceRadius * 0.40;
+          float s2 = uForceRadius * 0.95;
+          float v1 = gauss(dJ, s1);
+          float v2 = gauss(dJ, s2);
+          v1 = pow(v1, 0.78);
+          v2 = pow(v2, 0.90);
+          fVisual = clamp(0.78*v1 + 0.22*v2, 0.0, 1.0);
+        }
+
+        vec4 projectedPos = projectionMatrix * mvPosition;
+        vec2 screenPos = projectedPos.xy / projectedPos.w;
+        vec2 diff = (screenPos - uMouse) * vec2(uAspect, 1.0);
+        float dist = length(diff);
+        float hover = gauss(dist, max(0.0001, uInteractionRadius)) * uHoverWeight;
+
+        float lumMul   = 1.0 + (aRandom2 - 0.5) * 2.0 * uVarLumAmp;
+        float alphaMul = 1.0 + (aRandom  - 0.5) * 2.0 * uVarAlphaAmp;
+        alphaMul = clamp(alphaMul, 0.25, 1.65);
+
+        float tw = 1.0 + sin(uTime * 0.9 + aRandom2 * 12.0) * uTwinkleAmp;
+
+        float perSize = 0.65 + 0.85 * aRandom2;
+        float grow = pow(fVisual, 2.0) * formed * uSizeGain * perSize;
+        float hoverGrow = hover * 0.10;
+
+        float explodeSizeMul = mix(1.0, uExplodeShrink, Ee);
+        float size = uPointSize * (1.0 + grow + hoverGrow) * explodeSizeMul;
+
+        vInteractIntensity = fVisual * formed;
+        vVar = vec3(lumMul, alphaMul, tw);
+
+        gl_PointSize = size * (300.0 / -mvPosition.z);
+        gl_Position = projectedPos;
+      }
+    `;
+
+    const mainFragmentShader = `
+      uniform vec3  uColorGold;
+      uniform vec3  uColorCyan;
+      uniform float uGradPow;
+
+      uniform float uOpacity;
+      uniform float uExplodeFade;
+
+      varying float vC;
+      varying float vInteractIntensity;
+      varying vec3  vVar;
+      varying float vAssemble;
+      varying float vExplode;
+
+      void main(){
+        float r = distance(gl_PointCoord, vec2(0.5));
+        if (r > 0.5) discard;
+
+        float core = smoothstep(0.5, 0.0, r);
+        core = pow(core, 1.35);
+
+        float lum = vVar.x * vVar.z;
+        lum *= (1.0 + vInteractIntensity * 0.55);
+
+        // Gold ↔ Cyan gradient (make it pop with pow curve)
+        float t = clamp(vC, 0.0, 1.0);
+        t = pow(t, max(0.05, uGradPow));
+        vec3 base = mix(uColorGold, uColorCyan, t);
+
+        vec3 color = base * lum;
+        color = mix(color, vec3(1.0), vInteractIntensity * 0.16);
+
+        float introFade = pow(clamp(vAssemble, 0.0, 1.0), 1.35);
+        float explodeFade = mix(1.0, 1.0 - uExplodeFade, vExplode);
+
+        float a = uOpacity * vVar.y;
+        a *= (1.0 + vInteractIntensity * 0.25);
+        a *= core;
+        a *= introFade;
+        a *= explodeFade;
+
+        gl_FragColor = vec4(color, a);
+      }
+    `;
+
+    // ----------------------------
+    // Background Dust shaders
+    // ----------------------------
+    const bgVertexShader = `
+      uniform float uTime;
+      uniform float uSize;
+      uniform float uDrift;
+      uniform float uDepthFade;
+
+      attribute float aR;
+      attribute float aC;
+
+      varying float vA;
+      varying float vC;
+
+      void main(){
+        vec3 pos = position;
+
+        float t = uTime * 0.12 + aR * 10.0;
+        vec3 drift = vec3(
+          sin(t * 1.3 + aR * 6.0),
+          cos(t * 1.1 + aR * 4.0),
+          sin(t * 0.9 + aR * 8.0)
+        ) * (0.55 * uDrift);
+
+        pos += drift;
+
+        vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+        vec4 pr = projectionMatrix * mv;
+
+        float z = -mv.z;
+        float df = clamp(1.0 / (1.0 + z * 0.08), 0.15, 1.0);
+        df = mix(1.0, df, uDepthFade);
+
+        vA = df;
+        vC = aC;
+
+        float size = uSize * (0.95 + 1.35 * aR);
+        gl_PointSize = size * (300.0 / z);
+        gl_Position = pr;
+      }
+    `;
+
+    const bgFragmentShader = `
+      uniform float uTime;
+      uniform float uOpacity;
+      uniform float uTwinkle;
+      uniform vec3  uColorA;
+      uniform vec3  uColorB;
+      uniform float uExplode;
+
+      varying float vA;
+      varying float vC;
+
+      void main(){
+        float r = distance(gl_PointCoord, vec2(0.5));
+        if (r > 0.5) discard;
+
+        float core = smoothstep(0.5, 0.0, r);
+        core = pow(core, 1.55);
+
+        vec3 col = mix(uColorA, uColorB, vC);
+        float tw = 1.0 + sin(uTime * 0.7 + vC * 12.0) * uTwinkle;
+
+        float boost = 1.0 + 0.35 * uExplode;
+
+        float a = uOpacity * core * vA * tw * boost;
+        gl_FragColor = vec4(col, a);
+      }
+    `;
+
+    // ----------------------------
+    // Main material params
+    // ----------------------------
+    const mainParams = {
+      gold: "#D4AF37",
+      cyan: "#00FFFF",
+      gradPow: 0.65,  // <1: 更快偏向 cyan（更顯眼）；>1: 更慢偏向 cyan
+      size: 0.20,
+      opacity: 0.85,
+    };
+
+    function makeMainMaterial(){
+      return new THREE.ShaderMaterial({
+        uniforms: {
+          ...globalUniforms,
+          uColorGold: { value: new THREE.Color(mainParams.gold) },
+          uColorCyan: { value: new THREE.Color(mainParams.cyan) },
+          uGradPow:   { value: mainParams.gradPow },
+          uPointSize: { value: mainParams.size },
+          uOpacity:   { value: mainParams.opacity },
+        },
+        vertexShader: mainVertexShader,
+        fragmentShader: mainFragmentShader,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+    }
+
+    // ----------------------------
+    // Loader: parse your 6-column quoted CSV and use x,y,z only
+    // (x,y,z,"0","0","0") like your file shows :contentReference[oaicite:1]{index=1}
+    // ----------------------------
+    async function loadNCUData(url) {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status} ${res.statusText}`);
+      const text = await res.text();
+
+      const pts = [];
+      const r1 = [];
+      const r2 = [];
+
+      let sumX = 0, sumY = 0, sumZ = 0;
+
+      const lines = text.split(/\r?\n/);
+      for (const lineRaw of lines) {
+        const line = lineRaw.trim();
+        if (!line) continue;
+
+        const parts = line.split(",");
+        if (parts.length < 3) continue;
+
+        const x = parseFloat(parts[0].replace(/"/g, "").trim());
+        const y = parseFloat(parts[1].replace(/"/g, "").trim());
+        const z = parseFloat(parts[2].replace(/"/g, "").trim());
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+
+        pts.push([x, y, z]);
+        sumX += x; sumY += y; sumZ += z;
+
+        r1.push(Math.random());
+        r2.push(Math.random());
+      }
+
+      const n = pts.length;
+      if (!n) throw new Error("ncu.txt parsed 0 points.");
+
+      // recenter to origin
+      const cx = sumX / n, cy = sumY / n, cz = sumZ / n;
+
+      const coords = new Float32Array(n * 3);
+      const zs = new Float32Array(n);
+
+      let minZ = Infinity, maxZ = -Infinity;
+
+      for (let i = 0; i < n; i++) {
+        const x = pts[i][0] - cx;
+        const y = pts[i][1] - cy;
+        const z = pts[i][2] - cz;
+
+        coords[i*3+0] = x;
+        coords[i*3+1] = y;
+        coords[i*3+2] = z;
+
+        zs[i] = z;
+        if (z < minZ) minZ = z;
+        if (z > maxZ) maxZ = z;
+      }
+
+      // gradient factor aC: normalize z to 0..1
+      const aC = new Float32Array(n);
+      const denom = (maxZ - minZ) || 1.0;
+      for (let i = 0; i < n; i++) {
+        aC[i] = (zs[i] - minZ) / denom;
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(coords, 3));
+      geo.setAttribute("aRandom",  new THREE.Float32BufferAttribute(r1, 1));
+      geo.setAttribute("aRandom2", new THREE.Float32BufferAttribute(r2, 1));
+      geo.setAttribute("aC",       new THREE.BufferAttribute(aC, 1)); // NEW
+
+      const pointsObj = new THREE.Points(geo, makeMainMaterial());
+      root.add(pointsObj);
+
+      // radius for background shell
+      geo.computeBoundingBox();
+      const box = geo.boundingBox;
+      const size = new THREE.Vector3();
+      box.getSize(size);
+      const radius = Math.max(size.x, size.y, size.z) * 0.6;
+
+      return { pointsObj, radius };
+    }
+
+    // ----------------------------
+    // Background dust
+    // ----------------------------
+    let bgPoints = null;
+
+    function buildBackgroundDust(radius){
+      if (bgPoints) {
+        root.remove(bgPoints);
+        bgPoints.geometry.dispose();
+        bgPoints.material.dispose();
+        bgPoints = null;
+      }
+      if (!bgParams.enabled) return;
+
+      const count = bgParams.count;
+      const pos = new Float32Array(count * 3);
+      const aR  = new Float32Array(count);
+      const aC  = new Float32Array(count);
+
+      const rMin = radius * 1.25;
+      const rMax = radius * 3.3;
+
+      for (let i = 0; i < count; i++) {
+        const u = Math.random() * 2 - 1;
+        const t = Math.random() * Math.PI * 2;
+        const s = Math.sqrt(1 - u*u);
+        const dir = new THREE.Vector3(s * Math.cos(t), s * Math.sin(t), u);
+
+        const k = Math.pow(Math.random(), 0.65);
+        const rr = THREE.MathUtils.lerp(rMin, rMax, k);
+
+        const p = dir.multiplyScalar(rr);
+        pos[i*3+0] = p.x;
+        pos[i*3+1] = p.y;
+        pos[i*3+2] = p.z;
+
+        aR[i] = Math.random();
+        aC[i] = Math.random();
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute("aR", new THREE.BufferAttribute(aR, 1));
+      geo.setAttribute("aC", new THREE.BufferAttribute(aC, 1));
+
+      const mat = new THREE.ShaderMaterial({
+        uniforms: bgUniforms,
+        vertexShader: bgVertexShader,
+        fragmentShader: bgFragmentShader,
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+
+      bgPoints = new THREE.Points(geo, mat);
+      bgPoints.renderOrder = -10;
+      root.add(bgPoints);
+    }
+
+    // ----------------------------
+    // GUI
+    // ----------------------------
+    const gui = new GUI();
+    gui.close();
+
+    const f0 = gui.addFolder("Bloom");
+    f0.add(bloomParams, "strength", 0, 3, 0.01).onChange(v => bloomPass.strength = v);
+    f0.add(bloomParams, "radius", 0, 1, 0.01).onChange(v => bloomPass.radius = v);
+    f0.add(bloomParams, "threshold", 0, 1, 0.01).onChange(v => bloomPass.threshold = v);
+    f0.open();
+
+    const fMain = gui.addFolder("Main Points (Gold ↔ Cyan)");
+    fMain.addColor(mainParams, "gold").name("gold").onChange(() => {
+      root.traverse(obj => {
+        if (obj.isPoints && obj.material?.uniforms?.uColorGold) {
+          obj.material.uniforms.uColorGold.value.set(mainParams.gold);
+        }
+      });
+    });
+    fMain.addColor(mainParams, "cyan").name("cyan").onChange(() => {
+      root.traverse(obj => {
+        if (obj.isPoints && obj.material?.uniforms?.uColorCyan) {
+          obj.material.uniforms.uColorCyan.value.set(mainParams.cyan);
+        }
+      });
+    });
+    fMain.add(mainParams, "gradPow", 0.2, 3.0, 0.01).name("gradientPow").onChange(() => {
+      root.traverse(obj => {
+        if (obj.isPoints && obj.material?.uniforms?.uGradPow) {
+          obj.material.uniforms.uGradPow.value = mainParams.gradPow;
+        }
+      });
+    });
+    fMain.add(mainParams, "size", 0.02, 0.6, 0.001).onChange(() => {
+      root.traverse(obj => {
+        if (obj.isPoints && obj.material?.uniforms?.uPointSize) {
+          obj.material.uniforms.uPointSize.value = mainParams.size;
+        }
+      });
+    });
+    fMain.add(mainParams, "opacity", 0.0, 1.0, 0.01).onChange(() => {
+      root.traverse(obj => {
+        if (obj.isPoints && obj.material?.uniforms?.uOpacity) {
+          obj.material.uniforms.uOpacity.value = mainParams.opacity;
+        }
+      });
+    });
+    fMain.open();
+
+    const f1 = gui.addFolder("Assemble (入场汇聚)");
+    f1.add(assembleParams, "duration", 0.4, 4.0, 0.01);
+    f1.add(assembleParams, "radius", 10, 180, 1);
+    f1.add(assembleParams, "depth", 0, 260, 1);
+    f1.add(assembleParams, "swirl", 0, 6, 0.01);
+    f1.open();
+
+    const f2 = gui.addFolder("Explode (滚动爆散)");
+    f2.add(explodeParams, "start", 0.0, 1.0, 0.01);
+    f2.add(explodeParams, "end", 0.0, 1.0, 0.01);
+    f2.add(explodeParams, "radius", 40, 520, 1);
+    f2.add(explodeParams, "depth", 0, 420, 1);
+    f2.add(explodeParams, "shrink", 0.2, 1.0, 0.01);
+    f2.add(explodeParams, "fade", 0.0, 1.0, 0.01);
+    f2.open();
+
+    const f3 = gui.addFolder("Forces / Nebula");
+    f3.add(globalUniforms.uNoiseScale, "value", 0.05, 2.5, 0.01).name("噪声频率");
+    f3.add(globalUniforms.uNoiseAmp, "value", 0.0, 1.5, 0.01).name("噪声幅度");
+    f3.add(globalUniforms.uMoveRange, "value", 0.0, 1.0, 0.01).name("呼吸幅度");
+    f3.add(globalUniforms.uForceRadius, "value", 0.1, 6.0, 0.01).name("受力半径");
+    f3.add(globalUniforms.uPushStrength, "value", 0.0, 6.0, 0.01).name("慢推开强度");
+    f3.add(globalUniforms.uSwirlStrength, "value", 0.0, 8.0, 0.01).name("星云漩涡强度");
+    f3.add(globalUniforms.uTiltStrength, "value", 0.0, 1.5, 0.01).name("3D 倾斜强度");
+    f3.add(globalUniforms.uDepthStrength, "value", 0.0, 2.0, 0.01).name("深度扭转强度");
+    f3.open();
+
+    const f4 = gui.addFolder("No Vacuum");
+    f4.add(globalUniforms.uCoreRadius, "value", 0.0, 2.0, 0.01);
+    f4.add(globalUniforms.uHetero, "value", 0.0, 1.0, 0.01);
+    f4.add(globalUniforms.uMinInfluence, "value", 0.0, 0.6, 0.01);
+    f4.open();
+
+    const f5 = gui.addFolder("Spring (回弹手感)");
+    f5.add(spring, "K", 5, 140, 1);
+    f5.add(spring, "D", 1, 40, 0.5);
+    f5.open();
+
+    const f6 = gui.addFolder("Background Dust");
+    f6.add(bgParams, "enabled").onChange(() => { /* rebuilt after load */ });
+    f6.add(bgParams, "count", 1000, 20000, 500).onFinishChange(() => { /* rebuilt after load */ });
+    f6.add(bgParams, "size", 0.02, 0.22, 0.001).onChange(v => bgUniforms.uSize.value = v);
+    f6.add(bgParams, "opacity", 0.0, 0.8, 0.01).onChange(v => bgUniforms.uOpacity.value = v);
+    f6.add(bgParams, "drift", 0.0, 2.0, 0.01).onChange(v => bgUniforms.uDrift.value = v);
+    f6.add(bgParams, "twinkle", 0.0, 0.7, 0.01).onChange(v => bgUniforms.uTwinkle.value = v);
+    f6.add(bgParams, "depthFade", 0.0, 1.0, 0.01).onChange(v => bgUniforms.uDepthFade.value = v);
+    f6.open();
+
+    // ----------------------------
+    // Load (single file)
+    // ----------------------------
+    const { radius } = await loadNCUData("data/ncu.txt");
+    document.getElementById("loading")?.remove();
+
+    globalUniforms.uCenter.value.set(0,0,0);
+
+    buildBackgroundDust(radius);
+
+    camera.lookAt(0,0,0);
+    camera.updateMatrixWorld(true);
+
+    // cam-away dir
+    {
+      const camToward = camera.position.clone().normalize();
+      globalUniforms.uCamAwayDir.value.copy(camToward.multiplyScalar(-1).normalize());
+    }
+
+    // ----------------------------
+    // Mouse events
+    // ----------------------------
+    const parallax = { x: 0, y: 0 };
+
+    function setMouseNDCFromEvent(e, outVec2) {
+      const x = (e.clientX / window.innerWidth) * 2 - 1;
+      const y = -(e.clientY / window.innerHeight) * 2 + 1;
+      outVec2.set(x, y);
+    }
+
+    window.addEventListener("pointermove", (e) => {
+      setMouseNDCFromEvent(e, mouseTarget);
+      globalUniforms.uMouse.value.copy(mouseTarget);
+      parallax.x = mouseTarget.x;
+      parallax.y = mouseTarget.y;
+    });
+
+    window.addEventListener("pointerleave", () => {
+      mouseTarget.set(-10, -10);
+      globalUniforms.uMouse.value.set(-10, -10);
+      parallax.x = 0; parallax.y = 0;
+    });
+
+    // ----------------------------
+    // Ray dir in view space
+    // ----------------------------
+    const tmp = new THREE.Vector3();
+    const rayDirWorld = new THREE.Vector3();
+    const rayDirView  = new THREE.Vector3();
+
+    function updateRayDirViewFromMouseField() {
+      camera.updateMatrixWorld(true);
+      tmp.set(mouseField.x, mouseField.y, 0.5).unproject(camera);
+      rayDirWorld.copy(tmp).sub(camera.position).normalize();
+      rayDirView.copy(rayDirWorld).transformDirection(camera.matrixWorldInverse).normalize();
+      globalUniforms.uRayDirView.value.copy(rayDirView);
+    }
+
+    // ----------------------------
+    // Scroll progress
+    // ----------------------------
+    function getScrollProgress() {
+      const max = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+      return THREE.MathUtils.clamp(window.scrollY / max, 0, 1);
+    }
+
+    function smoothstep(a,b,x){
+      const t = THREE.MathUtils.clamp((x-a)/(b-a), 0, 1);
+      return t*t*(3-2*t);
+    }
+
+    // ----------------------------
+    // Animate
+    // ----------------------------
+    const clock = new THREE.Clock();
+    const rotTarget = new THREE.Vector2(0, 0);
+    const introStart = performance.now() / 1000;
+
+    function animate(){
+      requestAnimationFrame(animate);
+
+      const dt = Math.min(0.033, clock.getDelta());
+      const time = clock.elapsedTime;
+      globalUniforms.uTime.value = time;
+      bgUniforms.uTime.value = time;
+
+      // sync assemble/explode params
+      globalUniforms.uAssembleRadius.value = assembleParams.radius;
+      globalUniforms.uAssembleDepth.value  = assembleParams.depth;
+      globalUniforms.uAssembleSwirl.value  = assembleParams.swirl;
+
+      globalUniforms.uExplodeRadius.value = explodeParams.radius;
+      globalUniforms.uExplodeDepth.value  = explodeParams.depth;
+      globalUniforms.uExplodeShrink.value = explodeParams.shrink;
+      globalUniforms.uExplodeFade.value   = explodeParams.fade;
+
+      // assemble (time)
+      const nowS = performance.now() / 1000;
+      const tA = THREE.MathUtils.clamp((nowS - introStart - assembleParams.delay) / assembleParams.duration, 0, 1);
+      globalUniforms.uAssemble.value = 1 - Math.pow(1 - tA, 3);
+
+      // explode (scroll)
+      const p = getScrollProgress();
+      const tE = smoothstep(explodeParams.start, explodeParams.end, p);
+      globalUniforms.uExplode.value = tE;
+      bgUniforms.uExplode.value = tE;
+
+      // camera scroll storytelling
+      camera.position.copy(camBase);
+      camera.position.y = camBase.y + p * 9.0;
+      camera.position.z = camBase.z - p * 2.2;
+      camera.lookAt(0,0,0);
+
+      // parallax + scroll rotation
+      const scrollRotY = p * Math.PI * 0.85;
+      const scrollRotX = p * 0.35;
+      rotTarget.x = scrollRotX + (-parallax.y) * 0.18;
+      rotTarget.y = scrollRotY + ( parallax.x) * 0.22;
+      root.rotation.x += (rotTarget.x - root.rotation.x) * 0.06;
+      root.rotation.y += (rotTarget.y - root.rotation.y) * 0.06;
+
+      // spring field
+      const ax = spring.K * (mouseTarget.x - mouseField.x) - spring.D * mouseVel.x;
+      const ay = spring.K * (mouseTarget.y - mouseField.y) - spring.D * mouseVel.y;
+      mouseVel.x += ax * dt;
+      mouseVel.y += ay * dt;
+
+      // cap speed
+      const vLen = mouseVel.length();
+      if (vLen > limits.maxFieldSpeed) mouseVel.multiplyScalar(limits.maxFieldSpeed / vLen);
+
+      mouseField.x += mouseVel.x * dt;
+      mouseField.y += mouseVel.y * dt;
+
+      // moveDir (view plane)
+      const aspect = globalUniforms.uAspect.value;
+      const mvx = mouseVel.x, mvy = mouseVel.y;
+      const moveDir = globalUniforms.uMoveDirView.value;
+      const len = Math.hypot(mvx * aspect, mvy);
+      if (len > 1e-5) moveDir.set((mvx * aspect)/len, (mvy)/len, 0);
+      else moveDir.set(0,0,0);
+
+      // force alpha
+      const speed = Math.hypot(mvx, mvy);
+      const speedCapped = Math.min(speed, limits.maxFieldSpeed);
+      const rawTargetA = THREE.MathUtils.clamp(speedCapped * 0.55, 0, limits.maxForceAlpha);
+
+      const a = globalUniforms.uForceAlpha.value;
+      const rise = 0.18, decay = 0.03;
+      globalUniforms.uForceAlpha.value = (rawTargetA > a)
+        ? (a + (rawTargetA - a) * rise)
+        : (a + (rawTargetA - a) * decay);
+
+      // update cam-away dir
+      {
+        const camToward = camera.position.clone().normalize();
+        globalUniforms.uCamAwayDir.value.copy(camToward.multiplyScalar(-1).normalize());
+      }
+
+      updateRayDirViewFromMouseField();
+      composer.render();
+    }
+    animate();
+
+    // ----------------------------
+    // Resize
+    // ----------------------------
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      composer.setSize(window.innerWidth, window.innerHeight);
+
+      globalUniforms.uAspect.value = window.innerWidth / window.innerHeight;
+    });
+  </script>
+</body>
+</html>
