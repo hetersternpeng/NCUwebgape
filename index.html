@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>Fixed Relative Position Point Cloud</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; }
+        canvas { display: block; }
+        
+        #loading {
+            position: absolute; top: 20px; left: 20px;
+            color: rgba(255,255,255,0.5); font-family: monospace; pointer-events: none;
+            z-index: 10;
+        }
+
+        /* [修复] VS Code 颜色选择器位置，确保不再嵌套在 #loading 内 */
+        :root {
+            --color-trunk: #8f8883; 
+            --color-flowers: #51b466;
+            --color-fruits: #42dbdb;
+        }
+    </style>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+<div id="loading">正在加载点云 (保持原始相对位置)...</div>
+
+<script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+    // --- 场景初始化 ---
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+    
+    // 正前方视角：相机距离调远一点确保看全
+    camera.up.set(0, 0, 1);
+    camera.position.set(0, -25, 10);
+    camera.lookAt(0, 0, 10);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableRotate = false; // 旋转
+    controls.enablePan = false;     // 平移
+    controls.enableZoom = true;
+    controls.enableDamping = true;
+
+    const globalUniforms = {
+        uTime: { value: 0 },
+        uMouse: { value: new THREE.Vector2(-10, -10) },
+        uMoveRange: { value: 0.20 }, // 呼吸减弱，防止相对位置看起来晃动太大
+        uInteractionRadius: { value: 0.5 },
+        uAspect: { value: window.innerWidth / window.innerHeight }
+    };
+
+    // --- Shader ---
+    const vertexShader = `
+        uniform float uTime;
+        uniform float uMoveRange;
+        uniform float uPointSize;
+        uniform vec2 uMouse;
+        uniform float uInteractionRadius;
+        uniform float uAspect;
+        attribute float aRandom;
+        varying float vInteractIntensity;
+        varying vec3 vPos;
+
+        void main() {
+            vec3 pos = position;
+            pos.x += sin(uTime * 0.4 + aRandom * 10.0) * uMoveRange;
+            pos.y += cos(uTime * 0.3 + aRandom * 10.0) * uMoveRange;
+
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            vec4 projectedPos = projectionMatrix * mvPosition;
+            vec2 screenPos = projectedPos.xy / projectedPos.w;
+            
+            vec2 diff = (screenPos - uMouse) * vec2(uAspect, 1.0);
+            float dist = length(diff);
+
+            vInteractIntensity = 0.0;
+            float size = uPointSize;
+            if (dist < uInteractionRadius) {
+                vInteractIntensity = 1.0 - (dist / uInteractionRadius);
+                size *= (1.0 + pow(vInteractIntensity, 2.0) * 0.15);
+            }
+
+            vPos = pos;
+            gl_PointSize = size * (300.0 / -mvPosition.z);
+            gl_Position = projectedPos;
+        }
+    `;
+
+    const fragmentShader = `
+        uniform float uTime;
+        uniform vec3 uBaseColor;
+        uniform float uOpacity;
+        varying float vInteractIntensity;
+        varying vec3 vPos;
+
+        void main() {
+            float r = distance(gl_PointCoord, vec2(0.5, 0.5));
+            if (r > 0.5) discard;
+            vec3 color = uBaseColor;
+            color = mix(color, vec3(1.0), vInteractIntensity * 0.05);
+            gl_FragColor = vec4(color, uOpacity + vInteractIntensity * 0.05);
+        }
+    `;
+
+    // --- 加载逻辑 ---
+    const getCSSColor = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+    
+    const typeParams = {
+        trunk: { color: getCSSColor('--color-trunk'), size: 0.15 },
+        flowers: { color: getCSSColor('--color-flowers'), size: 0.2 },
+        fruits: { color: getCSSColor('--color-fruits'), size: 0.25 }
+    };
+
+    async function loadData(url, key) {
+        const res = await fetch(url);
+        const text = await res.text();
+        const coords = [], randoms = [];
+        text.split('\n').forEach(line => {
+            const p = line.trim().split(',').map(s => s.replace(/[^0-9.-]/g, ''));
+            if (p.length >= 3) {
+                coords.push(parseFloat(p[0]), parseFloat(p[1]), parseFloat(p[2]));
+                randoms.push(Math.random());
+            }
+        });
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(coords, 3));
+        geo.setAttribute('aRandom', new THREE.Float32BufferAttribute(randoms, 1));
+        
+        // [重要修改] 删除了 geo.center()，保留文件原始相对位置
+
+        const mat = new THREE.ShaderMaterial({
+            uniforms: {
+                ...globalUniforms,
+                uBaseColor: { value: new THREE.Color(typeParams[key].color) },
+                uPointSize: { value: typeParams[key].size },
+                uOpacity: { value: 0.8 }
+            },
+            vertexShader, fragmentShader,
+            transparent: true, depthWrite: false, blending: THREE.AdditiveBlending
+        });
+        scene.add(new THREE.Points(geo, mat));
+    }
+
+    Promise.all([
+        loadData('data/trunk_points.txt', 'trunk'),
+        loadData('data/flowers_points.txt', 'flowers'),
+        loadData('data/fruits_points.txt', 'fruits')
+    ]).then(() => {
+        document.getElementById('loading').remove();
+        
+        // [自动对焦] 如果点云坐标很大，我们让相机自动看向点云群的中心
+        const box = new THREE.Box3().setFromObject(scene);
+        const center = box.getCenter(new THREE.Vector3());
+        controls.target.copy(center); 
+        camera.lookAt(center);
+        
+        const gui = new GUI();
+        gui.add(globalUniforms.uInteractionRadius, 'value', 0.01, 1).name('扩散半径');
+        gui.add(globalUniforms.uMoveRange, 'value', 0, 1).name('呼吸幅度');
+    });
+
+    function animate() {
+        requestAnimationFrame(animate);
+        globalUniforms.uTime.value = performance.now() / 1000;
+        controls.update();
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('mousemove', (e) => {
+        globalUniforms.uMouse.value.x = (e.clientX / window.innerWidth) * 2 - 1;
+        globalUniforms.uMouse.value.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    });
+</script>
+</body>
+</html>
