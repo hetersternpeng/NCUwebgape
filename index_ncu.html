@@ -68,7 +68,7 @@
     const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2500);
     camera.up.set(0, 0, 1);
 
-    const camBase = new THREE.Vector3(0, -45, 10);
+    const camBase = new THREE.Vector3(0, -55, 10);
     camera.position.copy(camBase);
     camera.lookAt(0, 0, 0);
 
@@ -86,7 +86,7 @@
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
 
-    const bloomParams = { strength: 3.0, radius: 1.0, threshold: 0.34 };
+    const bloomParams = { strength: 3.0, radius: 1.0, threshold: 0.2 };
     const bloomPass = new UnrealBloomPass(
       new THREE.Vector2(window.innerWidth, window.innerHeight),
       bloomParams.strength,
@@ -106,7 +106,7 @@
     // ----------------------------
     const assembleParams = {
       delay: 0.10,
-      duration: 1.70,
+      duration: 2.08,
       radius: 95.0,
       depth: 140.0,
       swirl: 2.2,
@@ -114,11 +114,11 @@
 
     const explodeParams = {
       start: 0.30,
-      end: 0.92,
+      end: 0.95,
       radius: 260.0,
-      depth: 220.0,
-      shrink: 0.55,
-      fade: 0.85,
+      depth: 130.0,
+      shrink: 0.36,
+      fade: 0.48,
     };
 
     // ----------------------------
@@ -155,9 +155,9 @@
       uCamAwayDir: { value: new THREE.Vector3(0, 1, 0) },
 
       // Nebula noise/breathe
-      uNoiseScale: { value: 2.5 },
-      uNoiseAmp:   { value: 0.77 },
-      uMoveRange:  { value: 0.22 },
+      uNoiseScale: { value: 1.95 },
+      uNoiseAmp:   { value: 0.61 },
+      uMoveRange:  { value: 0.02 },
       uCenter:     { value: new THREE.Vector3(0, 0, 0) },
 
       // ray axis + move dir (view)
@@ -168,14 +168,14 @@
       uForceAlpha: { value: 0.0 },
 
       // forces
-      uForceRadius:   { value: 3.24 },
+      uForceRadius:   { value: 2.92 },
       uPushStrength:  { value: 3.12 },
       uSwirlStrength: { value: 0.0 },
       uTiltStrength:  { value: 0.0 },
       uDepthStrength: { value: 0.0 },
 
       // No Vacuum
-      uCoreRadius:   { value: 1.43 },
+      uCoreRadius:   { value: 0.78 },
       uHetero:       { value: 1.0 },
       uMinInfluence: { value: 0.19 },
 
@@ -196,11 +196,11 @@
     // ----------------------------
     const bgParams = {
       enabled: true,
-      count: 6500,
-      size: 0.11,
+      count: 11500,
+      size: 0.22,
       opacity: 0.22,
-      drift: 0.55,
-      twinkle: 0.22,
+      drift: 1.03,
+      twinkle: 0.18,
       depthFade: 0.85,
     };
 
@@ -617,11 +617,11 @@
     // Main material params
     // ----------------------------
     const mainParams = {
-      gold: "#D4AF37",
+      gold: "#ffb1a0",
       cyan: "#00FFFF",
-      gradPow: 0.65,  // <1: 更快偏向 cyan（更顯眼）；>1: 更慢偏向 cyan
-      size: 0.20,
-      opacity: 0.85,
+      gradPow: 1.33,  // <1: 更快偏向 cyan（更顯眼）；>1: 更慢偏向 cyan
+      size: 0.400,
+      opacity: 0.83,
     };
 
     function makeMainMaterial(){
